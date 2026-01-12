@@ -150,34 +150,75 @@ def run_react_cycle(user_demand: str, state: ConversationState, processor: NodeP
         prompt = render_template(node['prompt_template'], state.variables)
         prompt = prompt.replace("{{history}}", history_text)
         
-        # 调用LLM
-        response = processor.call_zhipu_ai(prompt, max_tokens=3000)
-        print(f"\nAgent 回复：\n{response}")
+        # 调用LLM（传入工具定义以支持结构化 tool_calls）
+        tools_definition = processor.get_tools_definition()
+        response = processor.call_zhipu_ai(prompt, max_tokens=3000, tools=tools_definition)
+        
+        # 检查是否是结构化响应（包含 tool_calls）
+        response_text = ""
+        tool_calls = None
+        if isinstance(response, dict) and 'tool_calls' in response:
+            # 现代方式：使用 tool_calls
+            response_text = response.get('content', '')
+            tool_calls = response.get('tool_calls', [])
+            print(f"\nAgent 回复：\n{response_text}")
+            if tool_calls:
+                print(f"\n🔧 检测到 {len(tool_calls)} 个工具调用（结构化方式）")
+        else:
+            # 降级：使用正则表达式提取（兼容旧模型）
+            response_text = response if isinstance(response, str) else str(response)
+            print(f"\nAgent 回复：\n{response_text}")
         
         # 提取并添加Thought到历史记录
-        thought = extract_thought(response)
+        thought = extract_thought(response_text)
         if thought:
             current_round_history.append(f"Thought: {thought}")
         
-        # 解析响应
-        response_lower = response.lower()
-        has_action = "action:" in response_lower
-        has_final = "final answer:" in response_lower
-        
-        # 提取Action
+        # 解析响应：优先使用 tool_calls，降级到正则表达式
+        has_action = False
+        has_final = False
         action_data = None
-        if has_action:
-            action_data = extract_action_json(response)
-            if action_data:
-                current_round_history.append(f"Action: {json.dumps(action_data, ensure_ascii=False)}")
-            else:
-                # Action为null，也记录到历史
-                current_round_history.append("Action: null")
+        
+        if tool_calls:
+            # 现代方式：从 tool_calls 提取 Action
+            has_action = len(tool_calls) > 0
+            if has_action:
+                action_data = []
+                for tool_call in tool_calls:
+                    try:
+                        func_name = tool_call['function']['name']
+                        func_args = json.loads(tool_call['function'].get('arguments', '{}'))
+                        action_data.append({
+                            "tool": func_name,
+                            "args": func_args
+                        })
+                    except (KeyError, json.JSONDecodeError) as e:
+                        print(f"⚠️  工具调用解析失败: {e}")
+                        continue
+                
+                if action_data:
+                    current_round_history.append(f"Action: {json.dumps(action_data, ensure_ascii=False)}")
+        else:
+            # 降级：使用正则表达式提取（兼容旧方式）
+            response_lower = response_text.lower()
+            has_action = "action:" in response_lower
+            has_final = "final answer:" in response_lower
+            
+            if has_action:
+                action_data = extract_action_json(response_text)
+                if action_data:
+                    current_round_history.append(f"Action: {json.dumps(action_data, ensure_ascii=False)}")
+                else:
+                    # Action为null，也记录到历史
+                    current_round_history.append("Action: null")
         
         # 提取Final Answer
         final_answer = None
+        if not has_final:
+            has_final = "final answer:" in response_text.lower()
+        
         if has_final:
-            final_answer = extract_final_answer(response)
+            final_answer = extract_final_answer(response_text)
             # 记录Final Answer到历史（避免重复）
             if final_answer:
                 current_round_history.append(f"Final Answer: {final_answer}")

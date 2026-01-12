@@ -712,35 +712,78 @@ class DocAdvisorGUI:
                 prompt = render_template(node['prompt_template'], self.state.variables)
                 prompt = prompt.replace("{{history}}", history_text)
                 
-                # 调用LLM
-                response = self.processor.call_zhipu_ai(prompt, max_tokens=3000)
-                response_msg = f"Agent 回复：\n{response}\n\n"
-                self.root.after(0, self.append_reasoning, response_msg)
+                # 调用LLM（传入工具定义以支持结构化 tool_calls）
+                tools_definition = self.processor.get_tools_definition()
+                response = self.processor.call_zhipu_ai(prompt, max_tokens=3000, tools=tools_definition)
+                
+                # 检查是否是结构化响应（包含 tool_calls）
+                response_text = ""
+                tool_calls = None
+                if isinstance(response, dict) and 'tool_calls' in response:
+                    # 现代方式：使用 tool_calls
+                    response_text = response.get('content', '')
+                    tool_calls = response.get('tool_calls', [])
+                    response_msg = f"Agent 回复：\n{response_text}\n\n"
+                    if tool_calls:
+                        response_msg += f"🔧 检测到 {len(tool_calls)} 个工具调用（结构化方式）\n\n"
+                    self.root.after(0, self.append_reasoning, response_msg)
+                else:
+                    # 降级：使用正则表达式提取（兼容旧模型）
+                    response_text = response if isinstance(response, str) else str(response)
+                    response_msg = f"Agent 回复：\n{response_text}\n\n"
+                    self.root.after(0, self.append_reasoning, response_msg)
                 
                 # 提取并添加Thought到历史记录
-                thought = self.extract_thought(response)
+                thought = self.extract_thought(response_text)
                 if thought:
                     current_round_history.append(f"Thought: {thought}")
                 
-                # 解析响应
-                response_lower = response.lower()
-                has_action = "action:" in response_lower
-                has_final = "final answer:" in response_lower
-                
-                # 提取Action
+                # 解析响应：优先使用 tool_calls，降级到正则表达式
+                has_action = False
+                has_final = False
                 action_data = None
-                if has_action:
-                    action_data = self.extract_action_json(response)
-                    if action_data:
-                        current_round_history.append(f"Action: {json.dumps(action_data, ensure_ascii=False)}")
-                    else:
-                        # Action为null，也记录到历史
-                        current_round_history.append("Action: null")
+                
+                if tool_calls:
+                    # 现代方式：从 tool_calls 提取 Action
+                    has_action = len(tool_calls) > 0
+                    if has_action:
+                        action_data = []
+                        for tool_call in tool_calls:
+                            try:
+                                func_name = tool_call['function']['name']
+                                func_args = json.loads(tool_call['function'].get('arguments', '{}'))
+                                action_data.append({
+                                    "tool": func_name,
+                                    "args": func_args
+                                })
+                            except (KeyError, json.JSONDecodeError) as e:
+                                error_msg = f"⚠️  工具调用解析失败: {e}\n\n"
+                                self.root.after(0, self.append_reasoning, error_msg)
+                                continue
+                        
+                        if action_data:
+                            current_round_history.append(f"Action: {json.dumps(action_data, ensure_ascii=False)}")
+                else:
+                    # 降级：使用正则表达式提取（兼容旧方式）
+                    response_lower = response_text.lower()
+                    has_action = "action:" in response_lower
+                    has_final = "final answer:" in response_lower
+                    
+                    if has_action:
+                        action_data = self.extract_action_json(response_text)
+                        if action_data:
+                            current_round_history.append(f"Action: {json.dumps(action_data, ensure_ascii=False)}")
+                        else:
+                            # Action为null，也记录到历史
+                            current_round_history.append("Action: null")
                 
                 # 提取Final Answer
                 final_answer = None
+                if not has_final:
+                    has_final = "final answer:" in response_text.lower()
+                
                 if has_final:
-                    final_answer = self.extract_final_answer(response)
+                    final_answer = self.extract_final_answer(response_text)
                     # 记录Final Answer到历史（避免重复）
                     if final_answer:
                         current_round_history.append(f"Final Answer: {final_answer}")
@@ -804,7 +847,12 @@ class DocAdvisorGUI:
             warning_msg = f"⚠️  达到最大步数 {max_steps}，强制生成最终答案...\n\n"
             self.root.after(0, self.append_reasoning, warning_msg)
             force_prompt = f"基于以下历史记录，回答用户问题：{user_demand}\n\n历史记录：\n{history_text}"
-            final_answer = self.processor.call_zhipu_ai(force_prompt, max_tokens=3000)
+            force_response = self.processor.call_zhipu_ai(force_prompt, max_tokens=3000)
+            # 处理可能的结构化响应
+            if isinstance(force_response, dict) and 'content' in force_response:
+                final_answer = force_response['content']
+            else:
+                final_answer = force_response if isinstance(force_response, str) else str(force_response)
             
             # 显示回答结果
             if final_answer:

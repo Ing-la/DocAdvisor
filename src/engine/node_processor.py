@@ -7,6 +7,7 @@ import colorama
 from colorama import Fore, Style
 import requests
 import os
+import json
 from dotenv import load_dotenv
 from .config_loader import render_template
 
@@ -62,7 +63,34 @@ class NodeProcessor:
         self.zhipu_api_key = self.api_key
         self.zhipu_model = self.model
     
-    def call_zhipu_ai(self, prompt, max_tokens=None):
+    def get_tools_definition(self):
+        """
+        获取工具定义（用于结构化 tool_calls）
+        
+        Returns:
+            list: 工具定义列表
+        """
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "search_cases",
+                    "description": "检索文档知识库，根据关键词查找相关文档片段",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "检索关键词，用空格分隔，例如：'ESG 销售' 或 '基金产品'"
+                            }
+                        },
+                        "required": ["query"]
+                    }
+                }
+            }
+        ]
+    
+    def call_zhipu_ai(self, prompt, max_tokens=None, tools=None):
         """
         调用大模型 API（支持多个提供商）
         
@@ -71,6 +99,12 @@ class NodeProcessor:
             max_tokens: 最大输出token数，None时使用默认值
                        - 默认值：1500（适合 Thought/Action）
                        - Final Answer 建议使用：3000
+            tools: 工具定义列表，None时使用默认工具定义
+        
+        Returns:
+            str 或 dict: 
+                - 如果模型返回 tool_calls，返回 dict: {'content': str, 'tool_calls': list}
+                - 否则返回 str（纯文本响应，兼容旧方式）
         """
         if not self.api_key:
             return "请配置API_KEY环境变量"
@@ -82,17 +116,21 @@ class NodeProcessor:
         if max_tokens is None:
             max_tokens = 1500  # 默认值，适合 Thought/Action 阶段
         
+        # 如果没有指定工具，使用默认工具定义
+        if tools is None:
+            tools = self.get_tools_definition()
+        
         # 根据提供商选择不同的API端点
         if self.provider == 'openai':
-            return self._call_openai(prompt, max_tokens)
+            return self._call_openai(prompt, max_tokens, tools)
         elif self.provider == 'anthropic':
-            return self._call_anthropic(prompt, max_tokens)
+            return self._call_anthropic(prompt, max_tokens, tools)
         elif self.provider == 'qwen':
-            return self._call_qwen(prompt, max_tokens)
+            return self._call_qwen(prompt, max_tokens, tools)
         elif self.provider == 'gemini':
-            return self._call_gemini(prompt, max_tokens)
+            return self._call_gemini(prompt, max_tokens, tools)
         else:  # 默认使用智谱AI
-            return self._call_zhipu(prompt, max_tokens)
+            return self._call_zhipu(prompt, max_tokens, tools)
     
     def _call_with_retry(self, url, headers, data, provider_name, max_retries=2, timeout=90, params=None):
         """带重试机制的API调用"""
@@ -134,7 +172,7 @@ class NodeProcessor:
         
         return {"error": "请求失败"}
     
-    def _call_zhipu(self, prompt, max_tokens):
+    def _call_zhipu(self, prompt, max_tokens, tools=None):
         """调用智谱AI API"""
         url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
         headers = {
@@ -149,17 +187,33 @@ class NodeProcessor:
             "max_tokens": max_tokens
         }
         
+        # 如果提供了工具定义，添加到请求中
+        if tools:
+            data["tools"] = tools
+            data["tool_choice"] = "auto"  # 让模型决定是否调用工具
+        
         result = self._call_with_retry(url, headers, data, "智谱AI")
         if "error" in result:
             return result["error"]
         try:
             if 'choices' not in result or not result['choices']:
                 return f"API返回格式异常：缺少choices字段。返回内容：{str(result)[:500]}"
-            return result['choices'][0]['message']['content']
+            
+            message = result['choices'][0]['message']
+            
+            # 检查是否有 tool_calls（现代方式）
+            if 'tool_calls' in message and message['tool_calls']:
+                return {
+                    'content': message.get('content', ''),
+                    'tool_calls': message['tool_calls']
+                }
+            
+            # 降级：返回纯文本（兼容旧方式）
+            return message.get('content', '')
         except (KeyError, IndexError, TypeError) as e:
             return f"API返回格式解析失败：{str(e)}。返回内容：{str(result)[:500]}"
     
-    def _call_openai(self, prompt, max_tokens):
+    def _call_openai(self, prompt, max_tokens, tools=None):
         """调用OpenAI API"""
         url = "https://api.openai.com/v1/chat/completions"
         headers = {
@@ -174,17 +228,33 @@ class NodeProcessor:
             "max_tokens": max_tokens
         }
         
+        # 如果提供了工具定义，添加到请求中
+        if tools:
+            data["tools"] = tools
+            data["tool_choice"] = "auto"
+        
         result = self._call_with_retry(url, headers, data, "OpenAI")
         if "error" in result:
             return result["error"]
         try:
             if 'choices' not in result or not result['choices']:
                 return f"API返回格式异常：缺少choices字段。返回内容：{str(result)[:500]}"
-            return result['choices'][0]['message']['content']
+            
+            message = result['choices'][0]['message']
+            
+            # 检查是否有 tool_calls（现代方式）
+            if 'tool_calls' in message and message['tool_calls']:
+                return {
+                    'content': message.get('content', ''),
+                    'tool_calls': message['tool_calls']
+                }
+            
+            # 降级：返回纯文本（兼容旧方式）
+            return message.get('content', '')
         except (KeyError, IndexError, TypeError) as e:
             return f"API返回格式解析失败：{str(e)}。返回内容：{str(result)[:500]}"
     
-    def _call_anthropic(self, prompt, max_tokens):
+    def _call_anthropic(self, prompt, max_tokens, tools=None):
         """调用Anthropic (Claude) API"""
         url = "https://api.anthropic.com/v1/messages"
         headers = {
@@ -200,17 +270,59 @@ class NodeProcessor:
             ]
         }
         
+        # Anthropic 使用 tools 参数（如果提供）
+        if tools:
+            # 转换工具格式为 Anthropic 格式
+            anthropic_tools = []
+            for tool in tools:
+                if tool.get('type') == 'function':
+                    anthropic_tools.append({
+                        "name": tool['function']['name'],
+                        "description": tool['function'].get('description', ''),
+                        "input_schema": tool['function']['parameters']
+                    })
+            if anthropic_tools:
+                data["tools"] = anthropic_tools
+        
         result = self._call_with_retry(url, headers, data, "Anthropic")
         if "error" in result:
             return result["error"]
         try:
             if 'content' not in result or not result['content']:
                 return f"API返回格式异常：缺少content字段。返回内容：{str(result)[:500]}"
-            return result['content'][0]['text']
+            
+            # Anthropic 返回格式：content 是数组，可能包含 text 或 tool_use
+            content_items = result['content']
+            tool_calls = []
+            text_content = []
+            
+            for item in content_items:
+                if item.get('type') == 'tool_use':
+                    # 转换 Anthropic 的 tool_use 格式为标准格式
+                    tool_calls.append({
+                        'id': item.get('id', ''),
+                        'type': 'function',
+                        'function': {
+                            'name': item.get('name', ''),
+                            'arguments': json.dumps(item.get('input', {}))
+                        }
+                    })
+                elif item.get('type') == 'text':
+                    text_content.append(item.get('text', ''))
+            
+            # 如果有 tool_calls，返回结构化响应
+            if tool_calls:
+                return {
+                    'content': '\n'.join(text_content),
+                    'tool_calls': tool_calls
+                }
+            
+            # 降级：返回纯文本
+            return result['content'][0].get('text', '')
         except (KeyError, IndexError, TypeError) as e:
             return f"API返回格式解析失败：{str(e)}。返回内容：{str(result)[:500]}"
     
-    def _call_qwen(self, prompt, max_tokens):
+    def _call_qwen(self, prompt, max_tokens, tools=None):
         """调用通义千问 API"""
         url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
         headers = {
@@ -230,6 +342,10 @@ class NodeProcessor:
             }
         }
         
+        # 如果提供了工具定义，添加到请求中
+        if tools:
+            data["input"]["tools"] = tools
+        
         result = self._call_with_retry(url, headers, data, "通义千问")
         if "error" in result:
             return result["error"]
@@ -239,20 +355,27 @@ class NodeProcessor:
             
             output = result['output']
             
+            # 检查是否有 tool_calls
+            if 'choices' in output and output['choices']:
+                message = output['choices'][0].get('message', {})
+                if 'tool_calls' in message and message['tool_calls']:
+                    return {
+                        'content': message.get('content', ''),
+                        'tool_calls': message['tool_calls']
+                    }
+                # 降级：返回纯文本
+                return message.get('content', '') or output.get('text', '')
+            
             # 优先尝试直接返回text格式（通义千问的默认格式）
             if 'text' in output:
                 return output['text']
-            
-            # 如果没有text，尝试choices格式
-            if 'choices' in output and output['choices']:
-                return output['choices'][0]['message']['content']
             
             # 如果都没有，返回错误信息
             return f"API返回格式异常：output中既没有text也没有choices字段。返回内容：{str(output)[:500]}"
         except (KeyError, IndexError, TypeError) as e:
             return f"API返回格式解析失败：{str(e)}。返回内容：{str(result)[:500]}"
     
-    def _call_gemini(self, prompt, max_tokens):
+    def _call_gemini(self, prompt, max_tokens, tools=None):
         """调用Google Gemini API"""
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
         headers = {
@@ -272,13 +395,60 @@ class NodeProcessor:
             }
         }
         
+        # Gemini 使用 tools 参数（如果提供）
+        if tools:
+            # 转换工具格式为 Gemini 格式
+            gemini_tools = {
+                "functionDeclarations": []
+            }
+            for tool in tools:
+                if tool.get('type') == 'function':
+                    gemini_tools["functionDeclarations"].append({
+                        "name": tool['function']['name'],
+                        "description": tool['function'].get('description', ''),
+                        "parameters": tool['function']['parameters']
+                    })
+            if gemini_tools["functionDeclarations"]:
+                data["tools"] = [gemini_tools]
+        
         result = self._call_with_retry(url, headers, data, "Gemini", params=params)
         if "error" in result:
             return result["error"]
         try:
             if 'candidates' not in result or not result['candidates']:
                 return f"API返回格式异常：缺少candidates字段。返回内容：{str(result)[:500]}"
-            return result['candidates'][0]['content']['parts'][0]['text']
+            
+            candidate = result['candidates'][0]
+            parts = candidate.get('content', {}).get('parts', [])
+            
+            # 检查是否有 functionCall（Gemini 的工具调用格式）
+            tool_calls = []
+            text_content = []
+            
+            for part in parts:
+                if 'functionCall' in part:
+                    # 转换 Gemini 的 functionCall 格式为标准格式
+                    func_call = part['functionCall']
+                    tool_calls.append({
+                        'id': f"gemini_{func_call.get('name', '')}",
+                        'type': 'function',
+                        'function': {
+                            'name': func_call.get('name', ''),
+                            'arguments': json.dumps(func_call.get('args', {}))
+                        }
+                    })
+                elif 'text' in part:
+                    text_content.append(part['text'])
+            
+            # 如果有 tool_calls，返回结构化响应
+            if tool_calls:
+                return {
+                    'content': '\n'.join(text_content),
+                    'tool_calls': tool_calls
+                }
+            
+            # 降级：返回纯文本
+            return parts[0].get('text', '') if parts else ''
         except (KeyError, IndexError, TypeError) as e:
             return f"API返回格式解析失败：{str(e)}。返回内容：{str(result)[:500]}"
     
