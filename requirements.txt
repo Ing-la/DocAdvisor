@@ -2,3 +2,5 @@ PyYAML>=6.0
 colorama
 requests
 python-dotenv
+fastapi
+uvicorn

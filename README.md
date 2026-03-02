@@ -60,6 +60,21 @@ python scripts/tkinter_app.py
 python scripts/main.py
 ```
 
+**Web API 后端（FastAPI）**：
+```bash
+pip install -r requirements.txt
+python scripts/api_server.py
+```
+
+**Web 前端（Next.js）**：
+```bash
+cd frontend
+pnpm install
+pnpm dev
+```
+
+默认前端地址：`http://localhost:3000`，默认 API 地址：`http://localhost:8000`。
+
 ## 💡 使用示例
 
 输入你的需求，Agent 会自动检索相关文档并生成专业方案：
