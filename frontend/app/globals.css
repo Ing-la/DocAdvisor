@@ -1,0 +1,16 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 225 24% 8%;
+  --foreground: 220 15% 92%;
+  --card: 228 20% 11%;
+  --muted: 230 16% 18%;
+  --border: 228 15% 24%;
+  --primary: 206 90% 60%;
+}
+
+body {
+  @apply bg-background text-foreground min-h-screen;
+}
