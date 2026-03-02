@@ -91,7 +91,7 @@ result = search_cases("ESG 销售", "cases")
 1. 在 `tools/` 目录下创建新文件（如 `calculator.py`）
 2. 实现工具函数
 3. 在 `tools/__init__.py` 中导出
-4. 在 `scripts/main.py` 或 `scripts/tkinter_app.py` 中注册工具调用逻辑
+4. 在 `src/api/chat_service.py` 中注册工具调用逻辑
 5. 在 `config/config.yaml` 的 prompt_template 中描述工具功能
 
 **工具函数规范**：
